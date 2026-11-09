@@ -1,0 +1,28 @@
+{
+  "name": "messmate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full-stack campus mess menu and feedback application",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "admin:sync-password": "node backend/scripts/admin-sync-password.js",
+    "test": "node --test backend/tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.2.0",
+    "dotenv": "^16.6.1",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.0.2"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
