@@ -316,49 +316,58 @@ document.getElementById('schedule-upload').addEventListener('change', async even
     event.target.value = '';
     return;
   }
+  const status = document.getElementById('schedule-upload-status');
+  status.hidden = false;
+  status.textContent = 'Uploading menu screenshot…';
+
   try {
     const formData = new FormData();
     formData.append('menuImage', file);
     const result = await api('/api/menu/image', { method: 'POST', body: formData });
     menuImage = result.menuImageUrl;
     updatePosterPreview();
-    const status = document.getElementById('schedule-upload-status');
-    status.hidden = false;
     status.textContent = 'Screenshot uploaded. Reading menu text…';
-    if (!window.Tesseract || !window.MenuScheduleOcr) {
-      throw new Error('The OCR service did not load. Check your connection and try again.');
-    }
-    let worker;
-    try {
-      worker = await window.Tesseract.createWorker('eng', 1, {
-        logger: message => {
-          if (message.status === 'recognizing text') {
-            status.textContent = `Reading menu text… ${Math.round(message.progress * 100)}%`;
-          }
+  } catch (uploadError) {
+    status.textContent = `Could not upload menu screenshot: ${uploadError.message}`;
+    showToast(`Could not upload menu screenshot: ${uploadError.message}`);
+    event.target.value = '';
+    return;
+  }
+
+  if (!window.Tesseract || !window.MenuScheduleOcr) {
+    status.textContent = 'The OCR service did not load. Check your connection and try again.';
+    showToast('The OCR service did not load. Check your connection and try again.');
+    event.target.value = '';
+    return;
+  }
+
+  let worker;
+  try {
+    worker = await window.Tesseract.createWorker('eng', 1, {
+      logger: message => {
+        if (message.status === 'recognizing text') {
+          status.textContent = `Reading menu text… ${Math.round(message.progress * 100)}%`;
         }
-      });
-      const { data } = await worker.recognize(file, {}, { tsv: true });
-      const detected = window.MenuScheduleOcr.parseMenuSchedule
-        ? window.MenuScheduleOcr.parseMenuSchedule(data)
-        : window.MenuScheduleOcr.parseMenuScheduleText(data.text, data.tsv);
-      if (!detected || !detected.length) {
-        status.textContent = 'Screenshot uploaded, but no meal rows were recognized. Existing schedule was left unchanged.';
-        showToast('Could not detect meal rows. Use a clear table with Day, Meal, Time and Menu columns.');
-        return;
       }
-      scheduleDraft = null;
-      await persistSchedule([...detected], 'Menu schedule updated from uploaded screenshot');
-      status.textContent = `${detected.length} meals detected and meal schedule updated automatically.`;
-      showToast(`${detected.length} meals detected and updated!`);
-    } finally {
-      if (worker) await worker.terminate();
+    });
+    const { data } = await worker.recognize(file, {}, { tsv: true });
+    const detected = window.MenuScheduleOcr.parseMenuSchedule
+      ? window.MenuScheduleOcr.parseMenuSchedule(data)
+      : window.MenuScheduleOcr.parseMenuScheduleText(data.text, data.tsv);
+    if (!detected || !detected.length) {
+      status.textContent = 'Screenshot uploaded, but no meal rows were recognized. Existing schedule was left unchanged.';
+      showToast('Could not detect meal rows. Use a clear table with Day, Meal, Time and Menu columns.');
+      return;
     }
-  } catch (error) {
-    const status = document.getElementById('schedule-upload-status');
-    status.hidden = false;
-    status.textContent = `Screenshot uploaded, but its schedule could not be read: ${error.message}`;
-    showToast(`Screenshot uploaded, but OCR failed: ${error.message}`);
+    scheduleDraft = null;
+    await persistSchedule([...detected], 'Menu schedule updated from uploaded screenshot');
+    status.textContent = `${detected.length} meals detected and meal schedule updated automatically.`;
+    showToast(`${detected.length} meals detected and updated!`);
+  } catch (ocrError) {
+    status.textContent = `Screenshot uploaded, but its schedule could not be read: ${ocrError.message}`;
+    showToast(`Screenshot uploaded, but OCR failed: ${ocrError.message}`);
   } finally {
+    if (worker) await worker.terminate();
     event.target.value = '';
   }
 });

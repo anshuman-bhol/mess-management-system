@@ -381,3 +381,63 @@ test('handles requests rewritten without /api prefix in serverless mode', async 
   assert.equal(sessionData.user, null);
 });
 
+test('menu images fall back to data URLs when Blob storage rejects public access or fails', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'messmate-blob-fallback-test-'));
+  const db = createDatabase(path.join(directory, 'messmate.sqlite'));
+  seedDefaultMenu(db);
+  const adminHash = await bcrypt.hash('AdminTestPassword!2026', 4);
+  db.prepare("INSERT INTO users (username, password_hash, role) VALUES ('admin', ?, 'admin')").run(adminHash);
+
+  const blobStorage = {
+    async put() {
+      throw new Error('Vercel Blob: Cannot use public access on a private store.');
+    },
+    async del() {}
+  };
+  const server = createApp({
+    db,
+    sessionSecret: 'test-only-session-secret-with-more-than-32-characters',
+    blobStorage
+  }).listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  t.after(async () => {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const loginResponse = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId: 'admin', password: 'AdminTestPassword!2026' })
+  });
+  const login = await loginResponse.json();
+  const cookie = loginResponse.headers.get('set-cookie').split(';')[0];
+
+  const formData = new FormData();
+  formData.append('menuImage', new Blob([Buffer.from([0xff, 0xd8, 0xff, 0x00])], { type: 'image/jpeg' }), 'menu.jpg');
+  const uploadResponse = await fetch(`${baseUrl}/api/menu/image`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'X-CSRF-Token': login.csrfToken },
+    body: formData
+  });
+  assert.equal(uploadResponse.status, 201);
+  const uploaded = await uploadResponse.json();
+  assert.ok(uploaded.menuImageUrl.startsWith('data:image/jpeg;base64,'));
+
+  const menuResponse = await fetch(`${baseUrl}/api/menu`);
+  assert.equal((await menuResponse.json()).menuImageUrl, uploaded.menuImageUrl);
+
+  const deleteResponse = await fetch(`${baseUrl}/api/menu/image`, {
+    method: 'DELETE',
+    headers: { Cookie: cookie, 'X-CSRF-Token': login.csrfToken }
+  });
+  assert.equal(deleteResponse.status, 200);
+
+  const clearedMenu = await (await fetch(`${baseUrl}/api/menu`)).json();
+  assert.equal(clearedMenu.menuImageUrl, null);
+});
+
+

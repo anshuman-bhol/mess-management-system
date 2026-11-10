@@ -309,7 +309,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
   app.get('/api/menu', async (_req, res) => {
     const schedule = await db.prepare('SELECT id, day, meal, service_time AS time, dish FROM menu_items ORDER BY sort_order, id').all();
     const menuImage = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value || null;
-    res.json({ schedule, menuImageUrl: menuImage ? (menuImage.startsWith('https://') ? menuImage : `/uploads/${menuImage}`) : null });
+    res.json({ schedule, menuImageUrl: menuImage ? (menuImage.startsWith('https://') || menuImage.startsWith('data:') ? menuImage : `/uploads/${menuImage}`) : null });
   });
 
   app.put('/api/menu', requireRole('admin'), requireCsrf, async (req, res) => {
@@ -361,25 +361,44 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
 
     const filename = `${crypto.randomUUID()}${extension}`;
     const filepath = uploadDir ? path.join(uploadDir, filename) : null;
-    const storedImage = blobStorage
-      ? await blobStorage.put(`menu/${filename}`, req.file.buffer, { access: 'public', addRandomSuffix: false })
-      : null;
+    let storedImage = null;
+    if (blobStorage) {
+      try {
+        storedImage = await blobStorage.put(`menu/${filename}`, req.file.buffer, { access: 'public', addRandomSuffix: false });
+      } catch (blobError) {
+        console.warn('Blob storage upload failed, falling back to database storage:', blobError.message);
+      }
+    }
     if (filepath) await fs.promises.writeFile(filepath, req.file.buffer, { flag: 'wx', mode: 0o640 });
     const previous = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value;
-    const imageValue = storedImage?.url || filename;
+    const mimeType = extension === '.png' ? 'image/png' : (extension === '.webp' ? 'image/webp' : 'image/jpeg');
+    const imageValue = storedImage?.url || (uploadDir ? filename : `data:${mimeType};base64,${req.file.buffer.toString('base64')}`);
     try {
       await db.prepare("INSERT INTO settings (key, value) VALUES ('menu_image', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .run(imageValue);
     } catch (error) {
-      if (storedImage) await blobStorage.del(storedImage.url);
+      if (storedImage) {
+        try {
+          await blobStorage.del(storedImage.url);
+        } catch (_delErr) {}
+      }
       if (filepath) await fs.promises.unlink(filepath);
       throw error;
     }
     if (previous && previous !== imageValue) {
-      if (previous.startsWith('https://')) await blobStorage?.del(previous);
-      else if (uploadDir) await fs.promises.unlink(path.join(uploadDir, previous));
+      if (previous.startsWith('https://')) {
+        try {
+          await blobStorage?.del(previous);
+        } catch (_delErr) {}
+      } else if (uploadDir && !previous.startsWith('data:')) {
+        try {
+          await fs.promises.unlink(path.join(uploadDir, previous));
+        } catch (unlinkError) {
+          if (unlinkError.code !== 'ENOENT') throw unlinkError;
+        }
+      }
     }
-    res.status(201).json({ menuImageUrl: storedImage?.url || `/uploads/${filename}` });
+    res.status(201).json({ menuImageUrl: storedImage?.url || (uploadDir ? `/uploads/${filename}` : imageValue) });
   });
 
   app.delete('/api/menu/image', requireRole('admin'), requireCsrf, async (_req, res) => {
@@ -388,7 +407,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
       try {
         await blobStorage?.del(previous);
       } catch (_delError) {}
-    } else if (previous && uploadDir) {
+    } else if (previous && uploadDir && !previous.startsWith('data:')) {
       try {
         await fs.promises.unlink(path.join(uploadDir, previous));
       } catch (unlinkError) {
