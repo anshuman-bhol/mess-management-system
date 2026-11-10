@@ -21,7 +21,7 @@ function createPostgresDatabase(connectionString) {
     connectionString,
     max: 1,
     idleTimeoutMillis: 10000,
-    connectionTimeoutMillis: 5000
+    connectionTimeoutMillis: 15000
   });
 
   async function initialize() {
