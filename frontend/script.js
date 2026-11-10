@@ -3,6 +3,7 @@ const maxUploadBytes = 4 * 1024 * 1024;
 let menuImage = '';
 let feedbackEntries = [];
 let menuSchedule = [];
+let scheduleDraft = null;
 let activeUser = null;
 let csrfToken = '';
 
@@ -170,6 +171,7 @@ async function logOut() {
 async function loadMenu() {
   const result = await api('/api/menu');
   menuSchedule = result.schedule;
+  scheduleDraft = null;
   menuImage = result.menuImageUrl || '';
   updatePosterPreview();
   renderScheduleRows();
@@ -183,10 +185,12 @@ async function loadAdminData() {
     api('/api/admin/students')
   ]);
   menuSchedule = menu.schedule;
+  scheduleDraft = null;
   menuImage = menu.menuImageUrl || '';
   feedbackEntries = feedback.feedback;
   updatePosterPreview();
   renderScheduleRows();
+  refreshStudentMenu();
   renderFeedback();
   renderStudents(students.students);
 }
@@ -199,8 +203,9 @@ function escapeHtml(value) {
 function renderScheduleRows() {
   const rows = document.getElementById('schedule-rows');
   if (!rows) return;
+  const schedule = scheduleDraft === null ? menuSchedule : scheduleDraft;
   const mealOrder = ['Breakfast', 'Lunch', 'Dinner'];
-  const ordered = menuSchedule.map((meal, index) => ({ meal, index })).sort((a, b) => {
+  const ordered = schedule.map((meal, index) => ({ meal, index })).sort((a, b) => {
     const dayOrder = weekDays.indexOf(a.meal.day) - weekDays.indexOf(b.meal.day);
     if (dayOrder) return dayOrder;
     return mealOrder.indexOf(a.meal.meal) - mealOrder.indexOf(b.meal.meal);
@@ -209,9 +214,11 @@ function renderScheduleRows() {
     const options = weekDays.map(day => '<option ' + (day === meal.day ? 'selected' : '') + '>' + day + '</option>').join('');
     return '<tr data-row-index="' + index + '"><td><select class="schedule-field day-field" aria-label="Day">' + options + '</select></td><td><input class="schedule-field meal-field" aria-label="Meal" value="' + escapeHtml(meal.meal) + '"></td><td><input class="schedule-field time-field" aria-label="Service time" value="' + escapeHtml(meal.time) + '"></td><td><input class="schedule-field menu-field" aria-label="Menu" value="' + escapeHtml(meal.dish) + '"></td><td><div class="row-actions"><button class="row-save" type="button" data-schedule-action="save">Save</button><button class="row-delete" type="button" data-schedule-action="delete" aria-label="Delete meal">×</button></div></td></tr>';
   }).join('');
-  document.getElementById('schedule-count').textContent = menuSchedule.length + (menuSchedule.length === 1 ? ' meal' : ' meals');
-  document.getElementById('schedule-empty').hidden = menuSchedule.length > 0;
-  document.querySelector('.schedule-scroll').hidden = menuSchedule.length === 0;
+  document.getElementById('schedule-count').textContent = schedule.length + (schedule.length === 1 ? ' meal' : ' meals');
+  document.getElementById('schedule-empty').hidden = schedule.length > 0;
+  document.querySelector('.schedule-scroll').hidden = schedule.length === 0;
+  document.getElementById('save-detected-schedule').hidden = scheduleDraft === null;
+  document.getElementById('cancel-detected-schedule').hidden = scheduleDraft === null;
 }
 
 async function persistSchedule(schedule, message) {
@@ -221,6 +228,7 @@ async function persistSchedule(schedule, message) {
       body: JSON.stringify({ schedule })
     });
     menuSchedule = result.schedule;
+    scheduleDraft = null;
     document.getElementById('last-saved').textContent = message;
     renderScheduleRows();
     refreshStudentMenu();
@@ -243,6 +251,20 @@ document.getElementById('schedule-rows').addEventListener('click', event => {
   if (!button) return;
   const row = button.closest('tr');
   const index = Number(row.dataset.rowIndex);
+  if (scheduleDraft !== null) {
+    if (button.dataset.scheduleAction === 'delete') {
+      scheduleDraft = scheduleDraft.filter((_, mealIndex) => mealIndex !== index);
+    } else {
+      const updated = readScheduleRow(row);
+      if (!updated.meal || !updated.time || !updated.dish) {
+        showToast('Add a meal name, time and menu before saving.');
+        return;
+      }
+      scheduleDraft = scheduleDraft.map((meal, mealIndex) => mealIndex === index ? updated : meal);
+    }
+    renderScheduleRows();
+    return;
+  }
   if (button.dataset.scheduleAction === 'delete') {
     const updatedSchedule = menuSchedule.filter((_, mealIndex) => mealIndex !== index);
     persistSchedule(updatedSchedule, 'Meal removed from this week');
@@ -258,8 +280,23 @@ document.getElementById('schedule-rows').addEventListener('click', event => {
 });
 
 document.getElementById('add-meal').addEventListener('click', () => {
-  const updatedSchedule = [...menuSchedule, { day: 'Monday', meal: 'New meal', time: '12:00 – 1:00 PM', dish: 'Add menu details' }];
-  persistSchedule(updatedSchedule, 'Meal added — edit the new row to finish');
+  const updatedSchedule = [...(scheduleDraft === null ? menuSchedule : scheduleDraft), { day: 'Monday', meal: 'New meal', time: '12:00 – 1:00 PM', dish: 'Add menu details' }];
+  if (scheduleDraft !== null) {
+    scheduleDraft = updatedSchedule;
+    renderScheduleRows();
+  } else {
+    persistSchedule(updatedSchedule, 'Meal added — edit the new row to finish');
+  }
+});
+
+document.getElementById('save-detected-schedule').addEventListener('click', () => {
+  if (scheduleDraft === null) return;
+  persistSchedule([...scheduleDraft], 'Detected menu saved just now');
+});
+
+document.getElementById('cancel-detected-schedule').addEventListener('click', () => {
+  scheduleDraft = null;
+  renderScheduleRows();
 });
 
 function updatePosterPreview() {
@@ -285,9 +322,42 @@ document.getElementById('schedule-upload').addEventListener('change', async even
     const result = await api('/api/menu/image', { method: 'POST', body: formData });
     menuImage = result.menuImageUrl;
     updatePosterPreview();
-    showToast('Weekly menu screenshot uploaded for students.');
+    const status = document.getElementById('schedule-upload-status');
+    status.hidden = false;
+    status.textContent = 'Screenshot uploaded. Reading menu text…';
+    if (!window.Tesseract || !window.MenuScheduleOcr) {
+      throw new Error('The OCR service did not load. Check your connection and try again.');
+    }
+    let worker;
+    try {
+      worker = await window.Tesseract.createWorker('eng', 1, {
+        logger: message => {
+          if (message.status === 'recognizing text') {
+            status.textContent = `Reading menu text… ${Math.round(message.progress * 100)}%`;
+          }
+        }
+      });
+      const { data } = await worker.recognize(file, {}, { tsv: true });
+      const detected = window.MenuScheduleOcr.parseMenuSchedule
+        ? window.MenuScheduleOcr.parseMenuSchedule(data)
+        : window.MenuScheduleOcr.parseMenuScheduleText(data.text, data.tsv);
+      if (!detected || !detected.length) {
+        status.textContent = 'Screenshot uploaded, but no meal rows were recognized. Existing schedule was left unchanged.';
+        showToast('Could not detect meal rows. Use a clear table with Day, Meal, Time and Menu columns.');
+        return;
+      }
+      scheduleDraft = null;
+      await persistSchedule([...detected], 'Menu schedule updated from uploaded screenshot');
+      status.textContent = `${detected.length} meals detected and meal schedule updated automatically.`;
+      showToast(`${detected.length} meals detected and updated!`);
+    } finally {
+      if (worker) await worker.terminate();
+    }
   } catch (error) {
-    showToast(error.message);
+    const status = document.getElementById('schedule-upload-status');
+    status.hidden = false;
+    status.textContent = `Screenshot uploaded, but its schedule could not be read: ${error.message}`;
+    showToast(`Screenshot uploaded, but OCR failed: ${error.message}`);
   } finally {
     event.target.value = '';
   }
@@ -297,8 +367,14 @@ document.getElementById('remove-poster').addEventListener('click', async () => {
   try {
     await api('/api/menu/image', { method: 'DELETE' });
     menuImage = '';
+    menuSchedule = [];
+    scheduleDraft = null;
     updatePosterPreview();
-    showToast('Menu screenshot removed.');
+    renderScheduleRows();
+    refreshStudentMenu();
+    document.getElementById('last-saved').textContent = 'Screenshot and meal schedule removed';
+    document.getElementById('schedule-upload-status').hidden = true;
+    showToast('Menu screenshot and meal schedule removed.');
   } catch (error) {
     showToast(error.message);
   }
@@ -541,8 +617,13 @@ document.querySelectorAll('.meal-link').forEach(button => {
   });
 });
 
-document.getElementById('hero-action').addEventListener('click', () => {
-  openModal('Today’s menu', 'THURSDAY · 30 OCTOBER', menuMarkup());
+document.getElementById('hero-action').addEventListener('click', async () => {
+  try {
+    await loadMenu();
+    openModal('Today’s menu', 'TODAY’S MENU', menuMarkup(displayedMeals, true));
+  } catch (error) {
+    showToast(`Could not load menu: ${error.message}`);
+  }
 });
 
 document.getElementById('modal-close').addEventListener('click', closeModal);
@@ -593,7 +674,7 @@ function openAttendanceInfo() {
 document.getElementById('attendance-more').addEventListener('click', openAttendanceInfo);
 
 document.querySelectorAll('[data-view]').forEach(link => {
-  link.addEventListener('click', event => {
+  link.addEventListener('click', async event => {
     if (link.dataset.view === 'feedback') { event.preventDefault(); return; }
     event.preventDefault();
     const view = link.dataset.view;
@@ -602,6 +683,12 @@ document.querySelectorAll('[data-view]').forEach(link => {
     document.querySelectorAll('.nav-link').forEach(item => item.classList.toggle('active', item === link));
     document.getElementById('sidebar').classList.remove('mobile-open');
     if (view === 'menu') {
+      try {
+        await loadMenu();
+      } catch (error) {
+        showToast(`Could not load menu: ${error.message}`);
+        return;
+      }
       openModal('This week at the mess', 'YOUR WEEKLY MENU', `<p class="modal-note">A look at what’s cooking at the Central Mess. Today’s menu is fresh from the kitchen.</p>${menuMarkup(menuSchedule, true)}`);
     } else if (view === 'attendance') {
       openAttendanceInfo();

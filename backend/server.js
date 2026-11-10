@@ -23,6 +23,7 @@ const staticFiles = [
   '/auth.css',
   '/admin.css',
   '/menu-upload.css',
+  '/menu-ocr.js',
   '/readability.css',
   '/1000111778.jpg'
 ];
@@ -149,14 +150,15 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
       directives: {
         defaultSrc: ["'self'"],
         baseUri: ["'self'"],
-        connectSrc: ["'self'"],
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         formAction: ["'self'"],
         frameAncestors: ["'none'"],
         imgSrc: ["'self'", 'data:', 'blob:', 'https://*.public.blob.vercel-storage.com'],
         objectSrc: ["'none'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']
+        scriptSrc: ["'self'", "'wasm-unsafe-eval'", "'unsafe-eval'", 'https://cdn.jsdelivr.net'],
+        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        workerSrc: ["'self'", 'blob:', 'https://cdn.jsdelivr.net'],
+        connectSrc: ["'self'", 'https://cdn.jsdelivr.net', 'https://tessdata.projectnaptha.com']
       }
     },
     crossOriginEmbedderPolicy: false
@@ -373,9 +375,30 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
 
   app.delete('/api/menu/image', requireRole('admin'), requireCsrf, async (_req, res) => {
     const previous = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value;
-    await db.prepare("DELETE FROM settings WHERE key = 'menu_image'").run();
-    if (previous?.startsWith('https://')) await blobStorage?.del(previous);
-    else if (previous && uploadDir) await fs.promises.unlink(path.join(uploadDir, previous));
+    if (previous?.startsWith('https://')) {
+      try {
+        await blobStorage?.del(previous);
+      } catch (_delError) {}
+    } else if (previous && uploadDir) {
+      try {
+        await fs.promises.unlink(path.join(uploadDir, previous));
+      } catch (unlinkError) {
+        if (unlinkError.code !== 'ENOENT') throw unlinkError;
+      }
+    }
+    if (db.isPostgres) {
+      await db.transaction(async tx => {
+        await tx.prepare("DELETE FROM settings WHERE key = 'menu_image'").run();
+        await tx.prepare('DELETE FROM menu_items').run();
+        await tx.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+      });
+    } else {
+      db.transaction(() => {
+        db.prepare("DELETE FROM settings WHERE key = 'menu_image'").run();
+        db.prepare('DELETE FROM menu_items').run();
+        db.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+      })();
+    }
     res.json({ ok: true });
   });
 

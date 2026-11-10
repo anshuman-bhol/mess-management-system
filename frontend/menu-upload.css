@@ -1,3 +1,12 @@
 .uploaded-poster{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:10px 13px;margin-bottom:15px;background:#fff;border:1px solid #e8ece4;border-radius:8px}.uploaded-poster>div{display:flex;align-items:center;gap:11px;min-width:0}.uploaded-poster img{width:64px;height:52px;object-fit:cover;border-radius:5px;border:1px solid #e7eae3}.uploaded-poster>div>span{display:grid;gap:4px}.uploaded-poster strong{font:700 10px var(--display);color:#4b5d48}.uploaded-poster small{font-size:8px;color:#8a9286}.uploaded-poster>button{height:29px;border:1px solid #eee4e0;border-radius:5px;background:#fff;color:#a16258;padding:0 9px;font:600 8px var(--sans);cursor:pointer}.uploaded-poster>button:hover{background:#fcf5f3}.menu-poster{width:100%;max-height:48vh;object-fit:contain;background:#f5f5f2;border:1px solid #e8eae5;border-radius:7px;margin-bottom:5px}
 @media(max-width:620px){.uploaded-poster{padding:8px;gap:8px}.uploaded-poster img{width:49px;height:45px}.uploaded-poster>button{padding:0 6px}.menu-poster{max-height:40vh}}
 .uploaded-poster[hidden]{display:none}
+.schedule-upload-status{margin:-5px 0 12px;color:#627657;font-size:10px;line-height:1.5}
+.schedule-upload-status[hidden]{display:none}
+.schedule-heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+.save-schedule-button,.cancel-schedule-button{height:30px;border-radius:6px;padding:0 10px;font:600 9px var(--sans);cursor:pointer}
+.save-schedule-button{border:1px solid #3d6046;background:#3d6046;color:#fff}
+.save-schedule-button:hover{background:#304e38}
+.cancel-schedule-button{border:1px solid #e8ece3;background:#fff;color:#687365}
+.schedule-heading-actions [hidden]{display:none}
+@media(max-width:620px){.schedule-heading-actions{justify-content:flex-start}.schedule-heading-actions button{font-size:8px;padding:0 7px}}

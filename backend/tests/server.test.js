@@ -287,6 +287,7 @@ test('authenticated roles can use persistent menu, feedback, uploads, and accoun
   });
   assert.equal(removedImage.response.status, 200);
   assert.equal((await request('/api/menu')).payload.menuImageUrl, null);
+  assert.deepEqual((await request('/api/menu')).payload.schedule, []);
 });
 
 test('menu images use persistent Blob URLs when Blob storage is configured', async t => {

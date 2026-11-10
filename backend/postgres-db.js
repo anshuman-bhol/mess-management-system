@@ -145,8 +145,14 @@ async function hashPassword(password) {
 async function seedDefaultMenu(db) {
   await db.transaction(async tx => {
     await tx.prepare('SELECT pg_advisory_xact_lock(824731)').get();
+    const alreadySeeded = await tx.prepare("SELECT value FROM settings WHERE key = 'default_menu_seeded'").get();
+    if (alreadySeeded) return;
+
     const count = await tx.prepare('SELECT COUNT(*) AS count FROM menu_items').get();
-    if (Number(count.count)) return;
+    if (Number(count.count)) {
+      await tx.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+      return;
+    }
 
     const insert = tx.prepare(
       'INSERT INTO menu_items (day, meal, service_time, dish, sort_order) VALUES (?, ?, ?, ?, ?)'
@@ -156,6 +162,7 @@ async function seedDefaultMenu(db) {
         await insert.run(day, meal, serviceTimes[mealIndex], sampleMenu[day][mealIndex], dayIndex * 3 + mealIndex);
       }
     }
+    await tx.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
   });
 }
 

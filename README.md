@@ -37,6 +37,8 @@ The spreadsheet's first worksheet must have `Student ID` and `Student Email ID` 
 
 The sample weekly menu is loaded into a new database on first startup. Existing menu data is retained on subsequent starts. Data previously saved in the old browser-only version is not automatically imported.
 
+Administrators can upload a menu screenshot with a table containing Day, Meal, Time, and Menu columns. The browser uses Tesseract.js to detect rows and shows them in the schedule for editing and review before they are saved; screenshots are not sent to an OCR service. The OCR library and English language data are loaded from jsDelivr. Removing the screenshot also clears the meal schedule.
+
 ### Admin password changed in `.env`
 
 The initial admin password is copied into SQLite only when the admin account is first created. Editing `ADMIN_PASSWORD` later does not change the existing account. For local development, run:

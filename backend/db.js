@@ -85,8 +85,14 @@ async function verifyPassword(password, storedHash) {
 }
 
 function seedDefaultMenu(db) {
+  const alreadySeeded = db.prepare("SELECT value FROM settings WHERE key = 'default_menu_seeded'").get();
+  if (alreadySeeded) return;
+
   const count = db.prepare('SELECT COUNT(*) AS count FROM menu_items').get().count;
-  if (count) return;
+  if (count) {
+    db.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
+    return;
+  }
 
   const insert = db.prepare(
     'INSERT INTO menu_items (day, meal, service_time, dish, sort_order) VALUES (?, ?, ?, ?, ?)'
@@ -97,6 +103,7 @@ function seedDefaultMenu(db) {
         insert.run(day, meal, serviceTimes[mealIndex], sampleMenu[day][mealIndex], dayIndex * 3 + mealIndex);
       });
     });
+    db.prepare("INSERT INTO settings (key, value) VALUES ('default_menu_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'").run();
   });
   seed();
 }
