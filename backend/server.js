@@ -69,7 +69,7 @@ function normalizedHeader(value) {
   return value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function validateStudentImport(worksheet, db) {
+async function validateStudentImport(worksheet, db) {
   const headerRow = worksheet.getRow(1);
   const headers = new Map();
   headerRow.eachCell({ includeEmpty: false }, (cell, column) => {
@@ -86,8 +86,9 @@ function validateStudentImport(worksheet, db) {
   const errors = [];
   const seenStudentIds = new Set();
   const seenEmails = new Set();
-  const existingUser = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE');
-  const existingEmail = db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE');
+  const existingUsers = await db.prepare('SELECT username, email FROM users').all();
+  const existingStudentIds = new Set(existingUsers.map(user => user.username.toLowerCase()));
+  const existingEmails = new Set(existingUsers.filter(user => user.email).map(user => user.email.toLowerCase()));
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
   for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
@@ -101,8 +102,8 @@ function validateStudentImport(worksheet, db) {
     if (Buffer.byteLength(email, 'utf8') > 254 || !emailPattern.test(email)) rowErrors.push('enter a valid student email address');
     if (studentId && seenStudentIds.has(studentId)) rowErrors.push('student ID is duplicated in this spreadsheet');
     if (email && seenEmails.has(email)) rowErrors.push('email address is duplicated in this spreadsheet');
-    if (studentIdPattern.test(studentId) && existingUser.get(studentId)) rowErrors.push('student ID already has an account');
-    if (emailPattern.test(email) && existingEmail.get(email)) rowErrors.push('email address is already assigned to an account');
+    if (studentIdPattern.test(studentId) && existingStudentIds.has(studentId.toLowerCase())) rowErrors.push('student ID already has an account');
+    if (emailPattern.test(email) && existingEmails.has(email.toLowerCase())) rowErrors.push('email address is already assigned to an account');
 
     if (studentId) seenStudentIds.add(studentId);
     if (email) seenEmails.add(email);
@@ -125,15 +126,23 @@ function imageExtension(buffer) {
   return '';
 }
 
-function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
+async function insertReturningId(db, sql, ...params) {
+  if (db.isPostgres) {
+    const result = await db.prepare(`${sql} RETURNING id`).run(...params);
+    return result.lastInsertRowid;
+  }
+  return db.prepare(sql).run(...params).lastInsertRowid;
+}
+
+function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobStorage, serveStatic = true, trustProxy = process.env.TRUST_PROXY === '1' }) {
   if (!db) throw new Error('A database connection is required.');
   if (!sessionSecret || sessionSecret.length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters.');
-  if (!uploadDir) throw new Error('An uploads directory is required.');
-  fs.mkdirSync(uploadDir, { recursive: true });
+  if (!blobStorage && !uploadDir) throw new Error('An uploads directory is required.');
+  if (!blobStorage) fs.mkdirSync(uploadDir, { recursive: true });
 
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', process.env.TRUST_PROXY === '1');
+  app.set('trust proxy', trustProxy);
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
@@ -143,7 +152,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         formAction: ["'self'"],
         frameAncestors: ["'none'"],
-        imgSrc: ["'self'", 'data:', 'blob:'],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https://*.public.blob.vercel-storage.com'],
         objectSrc: ["'none'"],
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']
@@ -157,7 +166,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     next();
   });
 
-  app.use((req, _res, next) => {
+  app.use(async (req, _res, next) => {
     const signedCookie = getCookie(req, SESSION_COOKIE);
     const [token, signature, extra] = signedCookie.split('.');
     if (!token || !signature || extra !== undefined || !safeEqual(signature, signToken(token, sessionSecret))) {
@@ -166,14 +175,14 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     }
 
     const tokenHash = hashToken(token);
-    const session = db.prepare(`
+    const session = await db.prepare(`
       SELECT sessions.token_hash, sessions.csrf_token, sessions.expires_at,
              users.id, users.username, users.role, users.active
       FROM sessions JOIN users ON users.id = sessions.user_id
       WHERE sessions.token_hash = ?
     `).get(tokenHash);
     if (!session || session.expires_at <= Date.now() || !session.active) {
-      if (session) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+      if (session) await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
       next();
       return;
     }
@@ -226,17 +235,17 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
   }
 
-  function createSession(userId, res) {
+  async function createSession(userId, res) {
     const token = crypto.randomBytes(32).toString('base64url');
     const csrfToken = crypto.randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + SESSION_DURATION_MS;
-    db.prepare('INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)')
+    await db.prepare('INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)')
       .run(hashToken(token), userId, csrfToken, expiresAt);
     setSessionCookie(res, token);
     return csrfToken;
   }
 
-  app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+  app.get(['/healthz', '/api/healthz'], (_req, res) => res.json({ status: 'ok' }));
 
   app.post('/api/login', loginLimiter, async (req, res) => {
     const username = typeof req.body?.studentId === 'string' ? req.body.studentId.trim() : '';
@@ -245,14 +254,14 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
       return res.status(400).json({ error: 'Enter your username and password.' });
     }
 
-    const user = db.prepare('SELECT id, username, password_hash, role, active FROM users WHERE username = ? COLLATE NOCASE').get(username);
+    const user = await db.prepare('SELECT id, username, password_hash, role, active FROM users WHERE LOWER(username) = LOWER(?)').get(username);
     const passwordMatches = user ? await verifyPassword(password, user.password_hash) : false;
     if (!user || !user.active || !passwordMatches) {
       return res.status(401).json({ error: 'That username or student ID and password combination does not match. Please try again.' });
     }
 
-    if (req.auth) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.auth.tokenHash);
-    const csrfToken = createSession(user.id, res);
+    if (req.auth) await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.auth.tokenHash);
+    const csrfToken = await createSession(user.id, res);
     res.json({ user: { id: user.id, username: user.username, role: user.role }, csrfToken });
   });
 
@@ -263,8 +272,8 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     });
   });
 
-  app.post('/api/logout', requireAuth, requireCsrf, (req, res) => {
-    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.auth.tokenHash);
+  app.post('/api/logout', requireAuth, requireCsrf, async (req, res) => {
+    await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.auth.tokenHash);
     clearSessionCookie(res);
     res.json({ ok: true });
   });
@@ -275,23 +284,23 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     if (!isValidPassword(newPassword)) {
       return res.status(400).json({ error: 'Use a password of at least 12 characters and no more than 72 UTF-8 bytes.' });
     }
-    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.auth.user.id);
+    const user = await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.auth.user.id);
     if (!user || !(await verifyPassword(currentPassword, user.password_hash))) {
       return res.status(400).json({ error: 'Your current password is incorrect.' });
     }
     const passwordHash = await hashPassword(newPassword);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, req.auth.user.id);
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(req.auth.user.id, req.auth.tokenHash);
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, req.auth.user.id);
+    await db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(req.auth.user.id, req.auth.tokenHash);
     res.json({ ok: true });
   });
 
-  app.get('/api/menu', (_req, res) => {
-    const schedule = db.prepare('SELECT id, day, meal, service_time AS time, dish FROM menu_items ORDER BY sort_order, id').all();
-    const menuImage = db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get()?.value || null;
-    res.json({ schedule, menuImageUrl: menuImage ? `/uploads/${menuImage}` : null });
+  app.get('/api/menu', async (_req, res) => {
+    const schedule = await db.prepare('SELECT id, day, meal, service_time AS time, dish FROM menu_items ORDER BY sort_order, id').all();
+    const menuImage = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value || null;
+    res.json({ schedule, menuImageUrl: menuImage ? (menuImage.startsWith('https://') ? menuImage : `/uploads/${menuImage}`) : null });
   });
 
-  app.put('/api/menu', requireRole('admin'), requireCsrf, (req, res) => {
+  app.put('/api/menu', requireRole('admin'), requireCsrf, async (req, res) => {
     const schedule = req.body?.schedule;
     if (!Array.isArray(schedule) || schedule.length > 100) {
       return res.status(400).json({ error: 'The menu must contain between 0 and 100 meals.' });
@@ -304,13 +313,22 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
         return res.status(400).json({ error: 'Each meal needs a valid day, meal name, service time and menu description.' });
       }
     }
-    const replaceSchedule = db.transaction(() => {
-      db.prepare('DELETE FROM menu_items').run();
-      const insert = db.prepare('INSERT INTO menu_items (day, meal, service_time, dish, sort_order) VALUES (?, ?, ?, ?, ?)');
-      schedule.forEach((meal, index) => insert.run(meal.day, meal.meal.trim(), meal.time.trim(), meal.dish.trim(), index));
-    });
-    replaceSchedule();
-    const savedSchedule = db.prepare('SELECT id, day, meal, service_time AS time, dish FROM menu_items ORDER BY sort_order, id').all();
+    if (db.isPostgres) {
+      await db.transaction(async tx => {
+        await tx.prepare('DELETE FROM menu_items').run();
+        const insert = tx.prepare('INSERT INTO menu_items (day, meal, service_time, dish, sort_order) VALUES (?, ?, ?, ?, ?)');
+        for (const [index, meal] of schedule.entries()) {
+          await insert.run(meal.day, meal.meal.trim(), meal.time.trim(), meal.dish.trim(), index);
+        }
+      });
+    } else {
+      db.transaction(() => {
+        db.prepare('DELETE FROM menu_items').run();
+        const insert = db.prepare('INSERT INTO menu_items (day, meal, service_time, dish, sort_order) VALUES (?, ?, ?, ?, ?)');
+        schedule.forEach((meal, index) => insert.run(meal.day, meal.meal.trim(), meal.time.trim(), meal.dish.trim(), index));
+      })();
+    }
+    const savedSchedule = await db.prepare('SELECT id, day, meal, service_time AS time, dish FROM menu_items ORDER BY sort_order, id').all();
     res.json({ schedule: savedSchedule });
   });
 
@@ -330,30 +348,39 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     if (!extension) return res.status(400).json({ error: 'The uploaded file is not a valid JPG, PNG or WebP image.' });
 
     const filename = `${crypto.randomUUID()}${extension}`;
-    const filepath = path.join(uploadDir, filename);
-    await fs.promises.writeFile(filepath, req.file.buffer, { flag: 'wx', mode: 0o640 });
-    const previous = db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get()?.value;
+    const filepath = uploadDir ? path.join(uploadDir, filename) : null;
+    const storedImage = blobStorage
+      ? await blobStorage.put(`menu/${filename}`, req.file.buffer, { access: 'public', addRandomSuffix: false })
+      : null;
+    if (filepath) await fs.promises.writeFile(filepath, req.file.buffer, { flag: 'wx', mode: 0o640 });
+    const previous = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value;
+    const imageValue = storedImage?.url || filename;
     try {
-      db.prepare("INSERT INTO settings (key, value) VALUES ('menu_image', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .run(filename);
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('menu_image', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run(imageValue);
     } catch (error) {
-      await fs.promises.unlink(filepath);
+      if (storedImage) await blobStorage.del(storedImage.url);
+      if (filepath) await fs.promises.unlink(filepath);
       throw error;
     }
-    if (previous && previous !== filename) await fs.promises.unlink(path.join(uploadDir, previous));
-    res.status(201).json({ menuImageUrl: `/uploads/${filename}` });
+    if (previous && previous !== imageValue) {
+      if (previous.startsWith('https://')) await blobStorage?.del(previous);
+      else if (uploadDir) await fs.promises.unlink(path.join(uploadDir, previous));
+    }
+    res.status(201).json({ menuImageUrl: storedImage?.url || `/uploads/${filename}` });
   });
 
   app.delete('/api/menu/image', requireRole('admin'), requireCsrf, async (_req, res) => {
-    const previous = db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get()?.value;
-    db.prepare("DELETE FROM settings WHERE key = 'menu_image'").run();
-    if (previous) await fs.promises.unlink(path.join(uploadDir, previous));
+    const previous = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value;
+    await db.prepare("DELETE FROM settings WHERE key = 'menu_image'").run();
+    if (previous?.startsWith('https://')) await blobStorage?.del(previous);
+    else if (previous && uploadDir) await fs.promises.unlink(path.join(uploadDir, previous));
     res.json({ ok: true });
   });
 
-  app.get('/uploads/:filename', (req, res, next) => {
+  app.get('/uploads/:filename', async (req, res, next) => {
     if (!/^[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(req.params.filename)) return res.sendStatus(404);
-    const current = db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get()?.value;
+    const current = (await db.prepare("SELECT value FROM settings WHERE key = 'menu_image'").get())?.value;
     if (current !== req.params.filename) return res.sendStatus(404);
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.sendFile(path.join(uploadDir, req.params.filename), error => {
@@ -361,33 +388,33 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     });
   });
 
-  app.get('/api/feedback', requireRole('admin'), (_req, res) => {
-    const feedback = db.prepare('SELECT id, student_id AS studentId, rating, comment, created_at AS createdAt FROM feedback ORDER BY created_at DESC, id DESC').all();
+  app.get('/api/feedback', requireRole('admin'), async (_req, res) => {
+    const feedback = await db.prepare('SELECT id, student_id AS studentId, rating, comment, created_at AS createdAt FROM feedback ORDER BY created_at DESC, id DESC').all();
     res.json({ feedback });
   });
 
-  app.post('/api/feedback', requireRole('student'), requireCsrf, (req, res) => {
+  app.post('/api/feedback', requireRole('student'), requireCsrf, async (req, res) => {
     const rating = Number.isInteger(req.body?.rating) ? req.body.rating : 0;
     const comment = typeof req.body?.comment === 'string' ? req.body.comment.trim() : '';
     if (rating < 0 || rating > 5 || comment.length > 1000 || (!rating && !comment)) {
       return res.status(400).json({ error: 'Add a comment or choose a star rating before sending.' });
     }
-    const result = db.prepare('INSERT INTO feedback (student_id, rating, comment) VALUES (?, ?, ?)')
-      .run(req.auth.user.username, rating, comment);
-    const entry = db.prepare('SELECT id, student_id AS studentId, rating, comment, created_at AS createdAt FROM feedback WHERE id = ?')
-      .get(result.lastInsertRowid);
+    const insertedId = await insertReturningId(db, 'INSERT INTO feedback (student_id, rating, comment) VALUES (?, ?, ?)',
+      req.auth.user.username, rating, comment);
+    const entry = await db.prepare('SELECT id, student_id AS studentId, rating, comment, created_at AS createdAt FROM feedback WHERE id = ?')
+      .get(insertedId);
     res.status(201).json({ feedback: entry });
   });
 
-  app.delete('/api/feedback/:id', requireRole('admin'), requireCsrf, (req, res) => {
+  app.delete('/api/feedback/:id', requireRole('admin'), requireCsrf, async (req, res) => {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid feedback entry.' });
-    const result = db.prepare('DELETE FROM feedback WHERE id = ?').run(Number(req.params.id));
+    const result = await db.prepare('DELETE FROM feedback WHERE id = ?').run(Number(req.params.id));
     if (!result.changes) return res.status(404).json({ error: 'That feedback entry no longer exists.' });
     res.json({ ok: true });
   });
 
-  app.get('/api/admin/students', requireRole('admin'), (_req, res) => {
-    const students = db.prepare("SELECT id, username, email, active, created_at AS createdAt FROM users WHERE role = 'student' ORDER BY username").all();
+  app.get('/api/admin/students', requireRole('admin'), async (_req, res) => {
+    const students = await db.prepare("SELECT id, username, email, active, created_at AS createdAt FROM users WHERE role = 'student' ORDER BY username").all();
     res.json({ students: students.map(student => ({ ...student, active: Boolean(student.active) })) });
   });
 
@@ -398,26 +425,36 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     if (!isValidPassword(password)) return res.status(400).json({ error: 'Use a password of at least 12 characters and no more than 72 UTF-8 bytes.' });
     const passwordHash = await hashPassword(password);
     try {
-      const result = db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'student')").run(studentId, passwordHash);
-      res.status(201).json({ student: { id: result.lastInsertRowid, username: studentId, active: true } });
+      const studentIdNumber = await insertReturningId(db, "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'student')", studentId, passwordHash);
+      res.status(201).json({ student: { id: studentIdNumber, username: studentId, active: true } });
     } catch (error) {
-      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'An account with that student ID already exists.' });
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.code === '23505') return res.status(409).json({ error: 'An account with that student ID already exists.' });
       throw error;
     }
   });
 
-  app.patch('/api/admin/students/:id', requireRole('admin'), requireCsrf, (req, res) => {
+  app.patch('/api/admin/students/:id', requireRole('admin'), requireCsrf, async (req, res) => {
     const active = req.body?.active;
     if (!/^\d+$/.test(req.params.id) || typeof active !== 'boolean') {
       return res.status(400).json({ error: 'Choose whether to activate or deactivate this student account.' });
     }
-    const updateStudent = db.transaction(() => {
-      const result = db.prepare("UPDATE users SET active = ? WHERE id = ? AND role = 'student'").run(Number(active), Number(req.params.id));
-      if (!result.changes) return false;
-      if (!active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(Number(req.params.id));
-      return true;
-    });
-    if (!updateStudent()) return res.status(404).json({ error: 'That student account no longer exists.' });
+    let updated;
+    if (db.isPostgres) {
+      updated = await db.transaction(async tx => {
+        const result = await tx.prepare("UPDATE users SET active = ? WHERE id = ? AND role = 'student'").run(Number(active), Number(req.params.id));
+        if (!result.changes) return false;
+        if (!active) await tx.prepare('DELETE FROM sessions WHERE user_id = ?').run(Number(req.params.id));
+        return true;
+      });
+    } else {
+      updated = db.transaction(() => {
+        const result = db.prepare("UPDATE users SET active = ? WHERE id = ? AND role = 'student'").run(Number(active), Number(req.params.id));
+        if (!result.changes) return false;
+        if (!active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(Number(req.params.id));
+        return true;
+      })();
+    }
+    if (!updated) return res.status(404).json({ error: 'That student account no longer exists.' });
     res.json({ ok: true });
   });
 
@@ -426,14 +463,25 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid student account.' });
     if (!isValidPassword(password)) return res.status(400).json({ error: 'Use a password of at least 12 characters and no more than 72 UTF-8 bytes.' });
     const passwordHash = await hashPassword(password);
-    const resetStudent = db.transaction(() => {
-      const student = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
-      if (!student) return false;
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, student.id);
-      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(student.id);
-      return true;
-    });
-    if (!resetStudent()) return res.status(404).json({ error: 'That student account no longer exists.' });
+    let reset;
+    if (db.isPostgres) {
+      reset = await db.transaction(async tx => {
+        const student = await tx.prepare("SELECT id FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
+        if (!student) return false;
+        await tx.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, student.id);
+        await tx.prepare('DELETE FROM sessions WHERE user_id = ?').run(student.id);
+        return true;
+      });
+    } else {
+      reset = db.transaction(() => {
+        const student = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
+        if (!student) return false;
+        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, student.id);
+        db.prepare('DELETE FROM sessions WHERE user_id = ?').run(student.id);
+        return true;
+      })();
+    }
+    if (!reset) return res.status(404).json({ error: 'That student account no longer exists.' });
     res.json({ ok: true });
   });
 
@@ -482,7 +530,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
       return res.status(400).json({ error: 'Import at most 5,000 student rows per spreadsheet.' });
     }
 
-    const validation = validateStudentImport(worksheet, db);
+    const validation = await validateStudentImport(worksheet, db);
     if (validation.errors.length) {
       return res.status(400).json({
         error: 'No accounts were imported. Fix the spreadsheet issues and try again.',
@@ -491,12 +539,6 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
       });
     }
 
-    const insertStudents = db.transaction(students => {
-      const insert = db.prepare("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, 'student')");
-      for (const student of students) {
-        insert.run(student.studentId, student.email, student.passwordHash);
-      }
-    });
     const studentsWithHashes = [];
     for (let index = 0; index < validation.rows.length; index += 8) {
       const batch = await Promise.all(validation.rows.slice(index, index + 8).map(async student => ({
@@ -506,9 +548,25 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
       studentsWithHashes.push(...batch);
     }
     try {
-      insertStudents(studentsWithHashes);
+      if (db.isPostgres) {
+        await db.transaction(async tx => {
+          for (let index = 0; index < studentsWithHashes.length; index += 250) {
+            const batch = studentsWithHashes.slice(index, index + 250);
+            const values = batch.map(() => "(?, ?, ?, 'student')").join(', ');
+            const params = batch.flatMap(student => [student.studentId, student.email, student.passwordHash]);
+            await tx.prepare(`INSERT INTO users (username, email, password_hash, role) VALUES ${values}`).run(...params);
+          }
+        });
+      } else {
+        db.transaction(() => {
+          const insert = db.prepare("INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, 'student')");
+          for (const student of studentsWithHashes) {
+            insert.run(student.studentId, student.email, student.passwordHash);
+          }
+        })();
+      }
     } catch (error) {
-      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.code === '23505') {
         return res.status(409).json({
           error: 'The student accounts changed while the spreadsheet was being imported. No accounts were imported; refresh the list and retry.',
           details: [],
@@ -520,13 +578,15 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false }) {
     res.status(201).json({ created: studentsWithHashes.length });
   });
 
-  for (const route of staticFiles) {
-    app.get(route, (req, res, next) => {
-      const filename = route === '/' ? 'index.html' : route.slice(1);
-      res.sendFile(path.join(__dirname, '..', 'frontend', filename), error => {
-        if (error && !res.headersSent) next(error);
+  if (serveStatic) {
+    for (const route of staticFiles) {
+      app.get(route, (req, res, next) => {
+        const filename = route === '/' ? 'index.html' : route.slice(1);
+        res.sendFile(path.join(__dirname, '..', 'frontend', filename), error => {
+          if (error && !res.headersSent) next(error);
+        });
       });
-    });
+    }
   }
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'That API endpoint does not exist.' }));

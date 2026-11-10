@@ -3,3 +3,4 @@ node_modules/
 data/
 uploads/
 npm-debug.log*
+.vercel/

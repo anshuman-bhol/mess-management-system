@@ -64,6 +64,23 @@ This sets the existing local admin password to the current `.env` value and revo
 
 Use HTTPS, a unique secret, and a deployment platform with persistent storage. Back up the SQLite database and uploads directory together. Do not deploy the SQLite database to an ephemeral/serverless filesystem. Store secrets in the hosting provider's secret manager rather than committing `.env`. For multiple server instances or high traffic, use a shared database and session store instead of SQLite.
 
+## Deploy to Vercel
+
+The Vercel configuration serves `frontend/` as static files and routes `/api/*` to a serverless Express function. Vercel deployments use Neon PostgreSQL for application data and Vercel Blob for uploaded menu images; local development continues to use SQLite and the local `uploads/` directory.
+
+1. In Vercel, import the GitHub repository and leave its Root Directory set to the repository root.
+2. Add a Neon PostgreSQL database and connect it to the Vercel project. Use its pooled connection string and ensure `DATABASE_URL` is available in the deployment environments.
+3. Create and connect a Vercel Blob store so `BLOB_READ_WRITE_TOKEN` is available.
+4. Add these environment variables in the Vercel project settings for Production (and Preview if desired):
+   - `SESSION_SECRET`: a unique random value of at least 32 characters.
+   - `ADMIN_USERNAME`: the initial administrator username.
+   - `ADMIN_PASSWORD`: a unique password between 12 and 72 UTF-8 bytes.
+   - `DATABASE_URL`: provided by the connected Neon database.
+   - `BLOB_READ_WRITE_TOKEN`: provided by the connected Blob store.
+5. Redeploy after connecting storage and adding variables. The first request initializes the database schema and creates the initial admin account if one does not exist.
+
+Do not set Vercel's Root Directory to `frontend/`; the function and package files live at the repository root. The Vercel database is initialized empty except for the sample menu and initial admin; local SQLite records and uploaded files are not copied automatically.
+
 The attendance, campus announcements, and notifications panels are intentionally marked as unavailable: no approved campus data sources or integration credentials are part of this project. The app does not display fabricated attendance figures or announcements.
 
 ## Tests

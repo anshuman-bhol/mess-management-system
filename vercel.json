@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "outputDirectory": "frontend",
+  "functions": {
+    "api/[...route].js": {
+      "maxDuration": 30
+    }
+  }
+}
