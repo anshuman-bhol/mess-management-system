@@ -43,9 +43,38 @@ async function getApp() {
   return appPromise;
 }
 
+function normalizeRequestUrl(req) {
+  const matched = req.headers['x-matched-path'] || req.headers['x-forwarded-uri'];
+  if (typeof matched === 'string' && matched.startsWith('/api')) {
+    const queryIdx = (req.url || '').indexOf('?');
+    if (queryIdx >= 0 && !matched.includes('?')) {
+      return `${matched}${req.url.slice(queryIdx)}`;
+    }
+    return matched;
+  }
+
+  let url = req.url || '/';
+  if (url.includes('[...route]')) {
+    const route = req.query?.route;
+    const pathPart = Array.isArray(route) ? route.join('/') : (typeof route === 'string' ? route : '');
+    const queryIdx = url.indexOf('?');
+    const queryString = queryIdx >= 0 ? url.slice(queryIdx) : '';
+    url = `/api/${pathPart}${queryString}`;
+  }
+
+  if (!url.startsWith('/api')) {
+    url = `/api${url.startsWith('/') ? '' : '/'}${url}`;
+  }
+
+  return url;
+}
+
 module.exports = async function handler(req, res) {
   try {
     const app = await getApp();
+    const normalizedUrl = normalizeRequestUrl(req);
+    req.url = normalizedUrl;
+    req.originalUrl = normalizedUrl;
     return app(req, res);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown initialization error';
@@ -56,5 +85,12 @@ module.exports = async function handler(req, res) {
     return res.end(JSON.stringify({
       error: 'The app server failed to initialize. Check the Vercel Function Logs and required environment variables.'
     }));
+  }
+};
+
+module.exports.config = {
+  api: {
+    bodyParser: false,
+    externalResolver: true
   }
 };

@@ -145,6 +145,15 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
+  app.use((req, _res, next) => {
+    if (req.url && !req.url.startsWith('/api') && !req.url.startsWith('/uploads') && req.url !== '/healthz') {
+      const isStaticRoute = serveStatic && staticFiles.includes(req.path);
+      if (!isStaticRoute) {
+        req.url = `/api${req.url.startsWith('/') ? '' : '/'}${req.url}`;
+      }
+    }
+    next();
+  });
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {

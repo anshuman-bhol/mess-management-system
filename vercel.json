@@ -1,15 +1,22 @@
 {
   "version": 2,
   "outputDirectory": "frontend",
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": "/api"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api"
+    }
+  ],
   "functions": {
+    "api/index.js": {
+      "maxDuration": 30
+    },
     "api/[...route].js": {
       "maxDuration": 30
     }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
-  ]
+  }
 }

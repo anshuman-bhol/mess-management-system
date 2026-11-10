@@ -348,3 +348,36 @@ test('menu images use persistent Blob URLs when Blob storage is configured', asy
   assert.equal(deleteResponse.status, 200);
   assert.deepEqual(deletedUrls, [uploaded.menuImageUrl]);
 });
+
+test('handles requests rewritten without /api prefix in serverless mode', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'messmate-serverless-test-'));
+  const db = createDatabase(path.join(directory, 'messmate.sqlite'));
+  seedDefaultMenu(db);
+  const server = createApp({
+    db,
+    sessionSecret: 'test-only-session-secret-with-more-than-32-characters',
+    blobStorage: { put: async () => {}, del: async () => {} },
+    serveStatic: false
+  }).listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  t.after(async () => {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  // Call /menu instead of /api/menu (simulating Vercel stripping /api)
+  const menuResponse = await fetch(`${baseUrl}/menu`);
+  assert.equal(menuResponse.status, 200);
+  const menuData = await menuResponse.json();
+  assert.ok(Array.isArray(menuData.schedule));
+
+  // Call /session instead of /api/session
+  const sessionResponse = await fetch(`${baseUrl}/session`);
+  assert.equal(sessionResponse.status, 200);
+  const sessionData = await sessionResponse.json();
+  assert.equal(sessionData.user, null);
+});
+
