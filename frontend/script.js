@@ -13,6 +13,17 @@ const toast = document.getElementById('toast');
 const toastMessage = document.getElementById('toast-message');
 let toastTimer;
 let modalAction = null;
+function getErrorMessage(error, fallback) {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error && typeof error === 'object') {
+    if (typeof error.message === 'string' && error.message.trim()) return error.message;
+    if (typeof error.error === 'string' && error.error.trim()) return error.error;
+    if (error.error && typeof error.error === 'object') return getErrorMessage(error.error, fallback);
+    if (typeof error.code === 'string' && error.code.trim()) return `${fallback} (${error.code})`;
+  }
+  return fallback;
+}
+
 function api(path, options = {}) {
   const headers = { Accept: 'application/json', ...options.headers };
   const isFormData = options.body instanceof FormData;
@@ -23,12 +34,13 @@ function api(path, options = {}) {
     try {
       payload = await response.json();
     } catch (parseError) {
-      const error = new Error('The server returned an invalid response.');
+      const error = new Error(`The server returned an invalid response (HTTP ${response.status}).`);
       error.cause = parseError;
       throw error;
     }
     if (!response.ok) {
-      const error = new Error(payload.error || 'The server could not complete that request.');
+      const fallback = `The server could not complete that request (HTTP ${response.status}).`;
+      const error = new Error(getErrorMessage(payload?.error || payload, fallback));
       error.status = response.status;
       error.details = payload.details || [];
       error.issueCount = payload.issueCount || error.details.length;

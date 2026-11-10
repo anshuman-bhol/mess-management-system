@@ -44,8 +44,19 @@ async function getApp() {
 }
 
 module.exports = async function handler(req, res) {
-  const app = await getApp();
-  return app(req, res);
+  try {
+    const app = await getApp();
+    return app(req, res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown initialization error';
+    console.error('Vercel app initialization failed:', message);
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(JSON.stringify({
+      error: 'The app server failed to initialize. Check the Vercel Function Logs and required environment variables.'
+    }));
+  }
 };
 
 module.exports.config = {
