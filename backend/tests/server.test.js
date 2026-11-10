@@ -173,6 +173,17 @@ test('authenticated roles can use persistent menu, feedback, uploads, and accoun
   assert.equal(duplicateImport.response.status, 400);
   assert.match(duplicateImport.payload.details.join(' '), /duplicated in this spreadsheet/);
 
+  const oversizedWorkbook = new FormData();
+  oversizedWorkbook.append('studentSpreadsheet', new Blob([Buffer.alloc(4 * 1024 * 1024 + 1)]), 'large.xlsx');
+  const rejectedWorkbook = await request('/api/admin/students/import', {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: oversizedWorkbook
+  });
+  assert.equal(rejectedWorkbook.response.status, 400);
+  assert.match(rejectedWorkbook.payload.error, /Excel workbook must be 4 MB or smaller/);
+
   const validWorkbook = new FormData();
   const longEmail = `${'x'.repeat(64)}@example.edu`;
   validWorkbook.append('studentSpreadsheet', new Blob([
@@ -244,6 +255,17 @@ test('authenticated roles can use persistent menu, feedback, uploads, and accoun
   assert.equal(image.response.status, 201);
   const servedImage = await request(image.payload.menuImageUrl);
   assert.equal(servedImage.response.status, 200);
+
+  const oversizedImage = new FormData();
+  oversizedImage.append('menuImage', new Blob([Buffer.alloc(4 * 1024 * 1024 + 1)]), 'large.jpg');
+  const rejectedImage = await request('/api/menu/image', {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: oversizedImage
+  });
+  assert.equal(rejectedImage.response.status, 400);
+  assert.match(rejectedImage.payload.error, /menu screenshot must be 4 MB or smaller/);
 
   const deactivated = await request(`/api/admin/students/${createdStudent.payload.student.id}`, {
     method: 'PATCH',

@@ -68,6 +68,8 @@ Use HTTPS, a unique secret, and a deployment platform with persistent storage. B
 
 The Vercel configuration serves `frontend/` as static files and routes `/api/*` to a serverless Express function. Vercel deployments use Neon PostgreSQL for application data and Vercel Blob for uploaded menu images; local development continues to use SQLite and the local `uploads/` directory.
 
+On Vercel, Excel workbooks and menu screenshots must each be 4 MB or smaller to stay below the serverless function request-body limit.
+
 1. In Vercel, import the GitHub repository and leave its Root Directory set to the repository root.
 2. Add a Neon PostgreSQL database and connect it to the Vercel project. Use its pooled connection string and ensure `DATABASE_URL` is available in the deployment environments.
 3. Create and connect a Vercel Blob store so `BLOB_READ_WRITE_TOKEN` is available.

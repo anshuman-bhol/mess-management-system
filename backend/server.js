@@ -12,6 +12,7 @@ const { createDatabase, ensureBootstrapAdmin, hashPassword, seedDefaultMenu, ver
 
 const SESSION_COOKIE = 'messmate_session';
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 const studentIdPattern = /^[AB]\d{6}$/;
 const weekDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const staticFiles = [
@@ -334,7 +335,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
 
   const menuUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024, files: 1 }
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 }
   }).single('menuImage');
 
   app.post('/api/menu/image', requireRole('admin'), requireCsrf, (req, res, next) => {
@@ -487,7 +488,7 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
 
   const spreadsheetUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
     fileFilter: (_req, file, callback) => {
       if (path.extname(file.originalname).toLowerCase() !== '.xlsx') {
         return callback(new Error('Choose an .xlsx Excel workbook.'));
@@ -597,8 +598,12 @@ function createApp({ db, sessionSecret, uploadDir, secureCookies = false, blobSt
   app.use((error, _req, res, _next) => {
     if (error instanceof multer.MulterError) {
       const message = error.code === 'LIMIT_FILE_SIZE'
-        ? 'The menu screenshot must be 5 MB or smaller.'
-        : 'Could not process that menu screenshot.';
+        ? error.field === 'studentSpreadsheet'
+          ? 'The Excel workbook must be 4 MB or smaller.'
+          : 'The menu screenshot must be 4 MB or smaller.'
+        : error.field === 'studentSpreadsheet'
+          ? 'Could not process that Excel workbook.'
+          : 'Could not process that menu screenshot.';
       return res.status(400).json({ error: message });
     }
     if (error.message === 'Choose an .xlsx Excel workbook.') {

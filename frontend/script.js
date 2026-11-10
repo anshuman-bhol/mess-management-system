@@ -1,4 +1,5 @@
 const weekDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const maxUploadBytes = 4 * 1024 * 1024;
 let menuImage = '';
 let feedbackEntries = [];
 let menuSchedule = [];
@@ -273,6 +274,11 @@ function updatePosterPreview() {
 document.getElementById('schedule-upload').addEventListener('change', async event => {
   const file = event.target.files[0];
   if (!file) return;
+  if (file.size > maxUploadBytes) {
+    showToast('The menu screenshot must be 4 MB or smaller.');
+    event.target.value = '';
+    return;
+  }
   try {
     const formData = new FormData();
     formData.append('menuImage', file);
@@ -323,6 +329,10 @@ document.getElementById('student-import-form').addEventListener('submit', async 
   const resultElement = document.getElementById('student-import-result');
   if (!input.files.length) {
     resultElement.textContent = 'Choose an .xlsx workbook first.';
+    return;
+  }
+  if (input.files[0].size > maxUploadBytes) {
+    resultElement.textContent = 'The Excel workbook must be 4 MB or smaller.';
     return;
   }
   const spreadsheet = new FormData();
